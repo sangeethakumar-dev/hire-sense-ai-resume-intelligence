@@ -1,0 +1,75 @@
+
+# ==============================
+# Personal and confidential data
+# ==============================
+
+# All uploaded resumes (including your personal resume)
+data/resumes/
+data/**/*.pdf
+data/**/*.docx
+data/**/*.doc
+
+# Other private datasets
+data/private/
+data/uploads/
+
+# ==============================
+# Environment variables and secrets
+# ==============================
+
+.env
+.env.*
+!.env.example
+
+# API keys and credentials
+secrets/
+credentials.json
+service-account.json
+
+# ==============================
+# Python
+# ==============================
+
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python packaging
+build/
+dist/
+*.egg-info/
+
+# Testing and coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ==============================
+# IDE and editor
+# ==============================
+
+.vscode/
+.idea/
+*.swp
+
+# ==============================
+# Logs and temporary files
+# ==============================
+
+*.log
+*.tmp
+temp/
+tmp/
+
+# ==============================
+# Operating system
+# ==============================
+
+.DS_Store
+Thumbs.db
