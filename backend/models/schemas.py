@@ -46,5 +46,11 @@ class JobDescriptionProfile(BaseModel):
     minimum_experience : str | None = None
     education : list[str] = Field(default_factory=list)
     responsibilities : list[str] = Field(default_factory=list)
-    
 
+class CandidateMatchresult(BaseModel):
+    overall_match_score : float
+    matched_skills : list[str] = Field(default_factory=list)
+    missing_required_skills : list[str] = Field(default_factory=list)
+    matched_preferred_skills : list[str] = Field(default_factory=list)
+    skill_match_percentage: float
+    match_summary : str
