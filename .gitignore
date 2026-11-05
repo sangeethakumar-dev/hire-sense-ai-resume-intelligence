@@ -75,4 +75,18 @@ tmp/
 Thumbs.db
 
 
+
+# ==============================
+# Local vector databases
+# ==============================
+
 data/chroma_db/
+data/chroma_db_*/
+data/chroma_db*/
+
+# Generated test outputs
+data/recruitment_test_results.json
+
+# Local temporary files
+data/temp/
+data/tmp/
