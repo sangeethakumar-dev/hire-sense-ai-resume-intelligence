@@ -40,12 +40,13 @@ class ResumeProfile(BaseModel):
     Certifications : list[Certification] = Field(default_factory=list)
     
 class JobDescriptionProfile(BaseModel):
-    job_title : str | None = None
-    required_skills : list[str] = Field(default_factory=list)
-    preferred_skills : list[str] = Field(default_factory=list)
-    minimum_experience : str | None = None
-    education : list[str] = Field(default_factory=list)
-    responsibilities : list[str] = Field(default_factory=list)
+    job_title: str | None = None
+    required_skills: list[str] = Field(default_factory=list)
+    preferred_skills: list[str] = Field(default_factory=list)
+    minimum_experience: str | None = None
+    education: list[str] = Field(default_factory=list)
+    graduation_year_eligibility: list[int] = Field(default_factory=list)
+    responsibilities: list[str] = Field(default_factory=list)
 
 class CandidateMatchResult(BaseModel):
     overall_match_score : float
@@ -68,3 +69,17 @@ class CandidateMatchResult(BaseModel):
     missing_requirements : list[str] = Field(default_factory=list)
 
     match_summary : str
+
+class CandidateEvaluation(BaseModel):
+    candidate_id: str | None = None
+    profile: ResumeProfile
+    match_result: CandidateMatchResult
+
+
+class RankedCandidate(BaseModel):
+    rank: int
+    candidate_id: str | None = None
+    candidate_name: str | None = None
+    overall_match_score: float
+    profile: ResumeProfile
+    match_result: CandidateMatchResult

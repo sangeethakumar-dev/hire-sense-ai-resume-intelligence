@@ -1,18 +1,13 @@
 
-import os
 import re
-from datetime import date
-
-from dotenv import load_dotenv
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from datetime import date, datetime
 
 from backend.models.schemas import (
     ResumeProfile,
     JobDescriptionProfile,
     CandidateMatchResult
 )
-
-load_dotenv()
+from backend.services.embedding_service import generate_embeddings
 
 
 # --------------------------------------------------
@@ -30,29 +25,7 @@ SEMANTIC_THRESHOLD = 0.70
 
 
 # --------------------------------------------------
-# 2. INITIALIZE EMBEDDING MODEL
-# --------------------------------------------------
-
-def get_embedding_model():
-
-    api_key = os.getenv("GOOGLE_API_KEY")
-
-    model_name = os.getenv(
-        "GEMINI_EMBEDDING_MODEL",
-        "gemini-embedding-001"
-    )
-
-    if not api_key:
-        raise ValueError("GOOGLE_API_KEY is missing from .env")
-
-    return GoogleGenerativeAIEmbeddings(
-        model=model_name,
-        google_api_key=api_key
-    )
-
-
-# --------------------------------------------------
-# 3. NORMALIZE TEXT
+# 2. TEXT UTILITIES
 # --------------------------------------------------
 
 def normalize_text(text: str) -> str:
@@ -63,38 +36,36 @@ def normalize_text(text: str) -> str:
 
     return text
 
+def normalize_skill(skill: str) -> str:
 
-# --------------------------------------------------
-# 4. KEYWORD MATCHING
-# --------------------------------------------------
+    skill = normalize_text(skill)
 
-def keyword_match(requirement: str, resume_text: str) -> float:
+    skill_aliases = {
+        "html": "html5",
+        "html 5": "html5",
+        "css": "css3",
+        "css 3": "css3",
+        "scikit learn": "scikit-learn",
+        "scikit learn library": "scikit-learn",
+    }
 
-    requirement = normalize_text(requirement)
-    resume_text = normalize_text(resume_text)
-
-    if requirement and requirement in resume_text:
-        return 1.0
-
-    return 0.0
+    return skill_aliases.get(skill, skill)
 
 
-# --------------------------------------------------
-# 5. SEMANTIC MATCHING
-# --------------------------------------------------
 
-def semantic_match(
-    requirement: str,
-    resume_text: str,
-    embedding_model
-) -> float:
+def as_text(value) -> str:
+    """Convert optional strings or lists into safe text."""
 
-    embeddings = embedding_model.embed_documents(
-        [requirement, resume_text]
-    )
+    if value is None:
+        return ""
 
-    vector_a = embeddings[0]
-    vector_b = embeddings[1]
+    if isinstance(value, list):
+        return " ".join(str(item) for item in value if item)
+
+    return str(value)
+
+
+def cosine_similarity(vector_a, vector_b) -> float:
 
     dot_product = sum(
         a * b for a, b in zip(vector_a, vector_b)
@@ -106,53 +77,99 @@ def semantic_match(
     if magnitude_a == 0 or magnitude_b == 0:
         return 0.0
 
-    similarity = dot_product / (magnitude_a * magnitude_b)
-
-    return max(0.0, min(1.0, similarity))
-
-
-# --------------------------------------------------
-# 6. HYBRID MATCHING
-# --------------------------------------------------
-
-def hybrid_match(
-    requirement: str,
-    resume_text: str,
-    embedding_model
-) -> tuple[float, float, float]:
-
-    keyword_score = keyword_match(
-        requirement,
-        resume_text
-    )
-
-    semantic_score = semantic_match(
-        requirement,
-        resume_text,
-        embedding_model
-    )
-
-    hybrid_score = (
-        KEYWORD_WEIGHT * keyword_score
-        + SEMANTIC_WEIGHT * semantic_score
-    )
-
-    return (
-        round(hybrid_score, 4),
-        keyword_score,
-        semantic_score
+    return max(
+        0.0,
+        min(1.0, dot_product / (magnitude_a * magnitude_b))
     )
 
 
 # --------------------------------------------------
-# 7. SKILL MATCHING
+# 3. RESUME EVIDENCE EXTRACTION
+# --------------------------------------------------
+
+def build_resume_evidence(candidate: ResumeProfile) -> list[str]:
+
+    evidence = []
+
+    if candidate.professional_summary:
+        evidence.append(candidate.professional_summary)
+
+    evidence.extend(candidate.technical_skills)
+    evidence.extend(candidate.soft_skills)
+
+    for experience in candidate.work_experience:
+
+        details = " ".join(filter(None, [
+            experience.job_title,
+            experience.company,
+            as_text(experience.description)
+        ]))
+
+        if details:
+            evidence.append(details)
+
+    for project in candidate.projects:
+
+        details = " ".join(filter(None, [
+            project.project_name,
+            as_text(project.description),
+            as_text(project.technologies)
+        ]))
+
+        if details:
+            evidence.append(details)
+
+    return list(dict.fromkeys(
+        item.strip() for item in evidence if item and item.strip()
+    ))
+
+
+# --------------------------------------------------
+# 4. KEYWORD MATCHING
+# --------------------------------------------------
+
+def keyword_match(requirement: str, evidence: str) -> float:
+
+    requirement = normalize_skill(requirement)
+    evidence = normalize_text(evidence)
+
+    if not requirement or not evidence:
+        return 0.0
+
+    # Normalize individual evidence terms
+    evidence_skills = [
+        normalize_skill(item.strip())
+        for item in re.split(r"[,;\n|]", evidence)
+    ]
+
+    # Exact skill match
+    if requirement in evidence_skills:
+        return 1.0
+
+    # Whole-word / phrase matching
+    pattern = rf"(?<![a-z0-9+#.]){re.escape(requirement)}(?![a-z0-9+#.])"
+
+    if re.search(pattern, evidence):
+        return 1.0
+
+    # Partial word overlap
+    requirement_words = set(requirement.split())
+    evidence_words = set(evidence.split())
+
+    matched_words = requirement_words.intersection(evidence_words)
+
+    return len(matched_words) / len(requirement_words)
+
+# --------------------------------------------------
+# 5. HYBRID SKILL MATCHING
 # --------------------------------------------------
 
 def evaluate_skills(
     job_skills: list[str],
     resume_evidence: list[str],
-    embedding_model
-):
+    evidence_embeddings: list[list[float]],
+    skill_embeddings: list[list[float]]
+) -> dict:
 
     matched_skills = []
     missing_skills = []
@@ -162,35 +179,42 @@ def evaluate_skills(
     keyword_scores = []
     semantic_scores = []
 
-    for skill in job_skills:
+    for index, skill in enumerate(job_skills):
 
-        evidence_scores = []
+        best_result = None
 
-        for evidence in resume_evidence:
+        for evidence_index, evidence in enumerate(resume_evidence):
 
-            hybrid, keyword, semantic = hybrid_match(
-                skill,
-                evidence,
-                embedding_model
+            keyword_score = keyword_match(skill, evidence)
+
+            semantic_score = cosine_similarity(
+                skill_embeddings[index],
+                evidence_embeddings[evidence_index]
             )
 
-            evidence_scores.append(
-                (hybrid, keyword, semantic, evidence)
+            hybrid_score = (
+                KEYWORD_WEIGHT * keyword_score
+                + SEMANTIC_WEIGHT * semantic_score
             )
 
-        if not evidence_scores:
-            missing_skills.append(skill)
+            result = (
+                hybrid_score,
+                keyword_score,
+                semantic_score,
+                evidence
+            )
+
+            if best_result is None or result[0] > best_result[0]:
+                best_result = result
+
+        if best_result is None:
             hybrid_scores.append(0.0)
             keyword_scores.append(0.0)
             semantic_scores.append(0.0)
+            missing_skills.append(skill)
             continue
 
-        best_match = max(
-            evidence_scores,
-            key=lambda result: result[0]
-        )
-
-        hybrid, keyword, semantic, evidence = best_match
+        hybrid, keyword, semantic, evidence = best_result
 
         hybrid_scores.append(hybrid)
         keyword_scores.append(keyword)
@@ -208,6 +232,7 @@ def evaluate_skills(
             missing_skills.append(skill)
 
     def average(values):
+
         return (
             sum(values) / len(values) * 100
             if values else 0.0
@@ -224,100 +249,274 @@ def evaluate_skills(
 
 
 # --------------------------------------------------
-# 8. EXPERIENCE MATCHING
+# 6. EXPERIENCE MATCHING
 # --------------------------------------------------
+
+def parse_date(value: str | None):
+
+    if not value:
+        return None
+
+    value = value.strip().lower()
+
+    if value in {"present", "current", "now"}:
+        return date.today()
+
+    formats = [
+        "%m/%Y",
+        "%Y-%m",
+        "%Y",
+        "%b %Y",
+        "%B %Y"
+    ]
+
+    for fmt in formats:
+
+        try:
+            return datetime.strptime(value, fmt).date()
+
+        except ValueError:
+            continue
+
+    return None
+
+
+def calculate_experience_years(candidate: ResumeProfile) -> float:
+
+    date_ranges = []
+
+    for experience in candidate.work_experience:
+
+        start = parse_date(experience.start_date)
+        end = parse_date(experience.end_date)
+
+        if not start or not end:
+            continue
+
+        # Convert date objects to datetime for consistent comparisons
+        if isinstance(start, date) and not isinstance(start, datetime):
+            start = datetime.combine(start, datetime.min.time())
+
+        if isinstance(end, date) and not isinstance(end, datetime):
+            end = datetime.combine(end, datetime.min.time())
+
+
+        if end < start:
+            continue
+
+        date_ranges.append((start, end))
+
+    if not date_ranges:
+        return 0.0
+
+    # Sort employment periods by start date
+    date_ranges.sort(key=lambda x: x[0])
+
+    # Merge overlapping periods
+    merged_ranges = []
+
+    current_start, current_end = date_ranges[0]
+
+    for start, end in date_ranges[1:]:
+
+        if start <= current_end:
+            current_end = max(current_end, end)
+
+        else:
+            merged_ranges.append((current_start, current_end))
+            current_start, current_end = start, end
+
+    merged_ranges.append((current_start, current_end))
+
+    # Calculate total months without double-counting
+    total_months = 0
+
+    for start, end in merged_ranges:
+
+        months = (
+            (end.year - start.year) * 12
+            + end.month - start.month
+        )
+
+        total_months += max(0, months)
+
+    return round(total_months / 12, 2)
 
 def evaluate_experience(
     candidate: ResumeProfile,
-    job: JobDescriptionProfile,
-    embedding_model
+    job: JobDescriptionProfile
 ) -> float | None:
 
     if not job.minimum_experience:
         return None
 
-    # Collect employment evidence separately.
-    # This preliminary version does not count projects as employment.
+    experience_requirement = job.minimum_experience.lower().strip()
 
-    candidate_experience = []
+    # Handle fresher / entry-level requirements
+    fresher_terms = [
+        "fresher",
+        "freshers",
+        "entry level",
+        "entry-level",
+        "no experience",
+        "0 years",
+        "0 year"
+    ]
 
-    for experience in candidate.work_experience:
+    if any(term in experience_requirement for term in fresher_terms):
+        return 100.0
 
-        details = " ".join(filter(None, [
-            experience.job_title,
-            experience.company,
-            " ".join(experience.description)
-        ]))
+    # Extract numeric experience requirement
+    match = re.search(
+        r"(\d+(?:\.\d+)?)\s*\+?\s*(?:years?|yrs?)",
+        experience_requirement
+    )
 
-        if details:
-            candidate_experience.append(details)
+    if not match:
+        return None
 
-    if not candidate_experience:
-        return 0.0
+    required_years = float(match.group(1))
 
-    # Compare the JD requirement with individual work entries.
-    scores = []
+    if required_years <= 0:
+        return 100.0
 
-    for experience in candidate_experience:
+    actual_years = calculate_experience_years(candidate)
 
-        score = semantic_match(
-            job.minimum_experience,
-            experience,
-            embedding_model
-        )
-
-        scores.append(score)
-
-    return round(max(scores) * 100, 2)
+    return round(
+        min(actual_years / required_years, 1.0) * 100,
+        2
+    )
 
 
 # --------------------------------------------------
-# 9. EDUCATION ELIGIBILITY
+# 7. EDUCATION ELIGIBILITY
 # --------------------------------------------------
 
-def evaluate_education(
-    candidate: ResumeProfile,
-    job: JobDescriptionProfile,
-    embedding_model
-) -> bool | None:
+
+def normalize_education_text(value: str | None) -> str:
+    """Normalize education text for deterministic comparison."""
+
+    if not value:
+        return ""
+
+    return re.sub(
+        r"[^a-z0-9 ]",
+        " ",
+        value.lower()
+    ).strip()
+
+
+def extract_graduation_year(value: str | None) -> int | None:
+    """Extract a four-digit graduation year."""
+
+    if not value:
+        return None
+
+    match = re.search(r"\b(19|20)\d{2}\b", value)
+
+    return int(match.group()) if match else None
+
+
+def evaluate_education(candidate, job) -> bool | None:
+    """
+    Check degree and graduation-year eligibility.
+    Returns:
+        True  - Candidate satisfies eligibility.
+        False - Candidate does not satisfy eligibility.
+        None  - Required information is missing.
+    """
 
     if not job.education:
         return None
 
-    candidate_education = []
+    accepted_degrees = {
+        normalize_education_text(degree).replace(" ", "")
+        for degree in job.education
+    }
 
-    for education in candidate.education:
+    degree_aliases = {
+        "bachelorofengineering": "be",
+        "be": "be",
+        "bacheloroftechnology": "btech",
+        "btech": "btech",
+        "bachelorofscience": "bsc",
+        "bsc": "bsc",
+        "bachelorofcomputerapplications": "bca",
+        "bca": "bca",
+        "masterofscience": "msc",
+        "msc": "msc",
+        "masterofcomputerapplications": "mca",
+        "mca": "mca"
+    }
 
-        details = " ".join(filter(None, [
-            education.degree,
-            education.field_of_study,
-            education.institution
-        ]))
+    accepted_degrees = {
+        degree_aliases.get(degree, degree)
+        for degree in accepted_degrees
+    }
 
-        if details:
-            candidate_education.append(details)
+    education_data = candidate.education
 
-    if not candidate_education:
+    if not education_data:
         return None
 
-    for requirement in job.education:
+    matching_degree_found = False
+    missing_year_found = False
 
-        for qualification in candidate_education:
+    for education in education_data:
 
-            score = semantic_match(
-                requirement,
-                qualification,
-                embedding_model
+        if isinstance(education, dict):
+            degree = education.get("degree")
+            graduation_year = education.get("graduation_year")
+        else:
+            degree = getattr(education, "degree", None)
+            graduation_year = getattr(
+                education, "graduation_year", None
             )
 
-            if score >= SEMANTIC_THRESHOLD:
-                return True
+        if not degree:
+            continue
+
+        candidate_degree = (
+            normalize_education_text(degree).replace(" ", "")
+        )
+
+        candidate_degree = degree_aliases.get(
+            candidate_degree,
+            candidate_degree
+        )
+
+        if candidate_degree not in accepted_degrees:
+            continue
+
+        matching_degree_found = True
+
+        # If JD has no graduation-year restriction,
+        # matching degree is sufficient.
+        if not job.graduation_year_eligibility:
+            return True
+
+        candidate_year = extract_graduation_year(
+            str(graduation_year) if graduation_year else None
+        )
+
+        if candidate_year is None:
+            missing_year_found = True
+            continue
+
+        if candidate_year in job.graduation_year_eligibility:
+            return True
+
+    if not matching_degree_found:
+        return False
+
+    if missing_year_found:
+        return None
 
     return False
 
 
 # --------------------------------------------------
-# 10. MAIN CANDIDATE MATCHING FUNCTION
+# 8. MAIN CANDIDATE MATCHING FUNCTION
 # --------------------------------------------------
 
 def match_candidate(
@@ -325,88 +524,107 @@ def match_candidate(
     job: JobDescriptionProfile
 ) -> CandidateMatchResult:
 
-    embedding_model = get_embedding_model()
+    resume_evidence = build_resume_evidence(candidate)
 
-    # Build separate resume evidence entries.
+    # Collect all text inputs for one local embedding batch.
+    all_texts = (
+        resume_evidence
+        + job.required_skills
+        + job.preferred_skills
+        + job.education
+    )
 
-    resume_evidence = []
+    if not all_texts:
+        raise ValueError("No candidate or job information available.")
 
-    if candidate.professional_summary:
-        resume_evidence.append(
-            candidate.professional_summary
-        )
+    # Generate local embeddings in one batch.
+    all_embeddings = generate_embeddings(all_texts)
 
-    resume_evidence.extend(candidate.technical_skills)
-    resume_evidence.extend(candidate.soft_skills)
+    evidence_count = len(resume_evidence)
+    required_count = len(job.required_skills)
+    preferred_count = len(job.preferred_skills)
 
-    for experience in candidate.work_experience:
+    evidence_embeddings = all_embeddings[:evidence_count]
 
-        if experience.job_title:
-            resume_evidence.append(experience.job_title)
+    required_embeddings = all_embeddings[
+        evidence_count:evidence_count + required_count
+    ]
 
-        resume_evidence.extend(experience.description)
+    preferred_embeddings = all_embeddings[
+        evidence_count + required_count:
+        evidence_count + required_count + preferred_count
+    ]
 
-    for project in candidate.projects:
-
-        if project.project_name:
-            resume_evidence.append(project.project_name)
-
-        resume_evidence.extend(project.description)
-        resume_evidence.extend(project.technologies)
+    education_embeddings = all_embeddings[
+        evidence_count + required_count + preferred_count:
+    ]
 
     # Required skills
-
     required_result = evaluate_skills(
         job.required_skills,
         resume_evidence,
-        embedding_model
+        evidence_embeddings,
+        required_embeddings
     )
 
     # Preferred skills
-
     preferred_result = evaluate_skills(
         job.preferred_skills,
         resume_evidence,
-        embedding_model
+        evidence_embeddings,
+        preferred_embeddings
     )
 
     # Experience
-
-    experience_score = evaluate_experience(
-        candidate,
-        job,
-        embedding_model
-    )
+    experience_score = evaluate_experience(candidate, job)
 
     # Education
+    candidate_education_texts = [
+        " ".join(filter(None, [
+            education.degree,
+            education.field_of_study,
+            education.institution
+        ]))
+        for education in candidate.education
+    ]
+
+    candidate_education_texts = [
+        text for text in candidate_education_texts if text.strip()
+    ]
+
+    # Generate candidate education vectors in a separate local batch.
+    candidate_education_embeddings = (
+        generate_embeddings(candidate_education_texts)
+        if candidate_education_texts else []
+    )
 
     education_eligible = evaluate_education(
         candidate,
         job,
-        embedding_model
     )
 
-    # Aggregate keyword and semantic scores
-    all_skill_results = [
-        result
-        for result in [required_result, preferred_result]
-        if result["matched_skills"] or result["missing_skills"]
-    ]
+    # Aggregate diagnostic scores across individual skill requirements.
+    diagnostic_results = []
+
+    if job.required_skills:
+        diagnostic_results.append(required_result)
+
+    if job.preferred_skills:
+        diagnostic_results.append(preferred_result)
 
     keyword_match_score = (
-        sum(result["keyword_score"] for result in all_skill_results)
-        / len(all_skill_results)
-        if all_skill_results else 0.0
+        sum(r["keyword_score"] for r in diagnostic_results)
+        / len(diagnostic_results)
+        if diagnostic_results else 0.0
     )
 
     semantic_match_score = (
-        sum(result["semantic_score"] for result in all_skill_results)
-        / len(all_skill_results)
-        if all_skill_results else 0.0
+        sum(r["semantic_score"] for r in diagnostic_results)
+        / len(diagnostic_results)
+        if diagnostic_results else 0.0
     )
 
-    # Weighted scoring
-
+    # Weighted overall score.
     active_weights = []
 
     if experience_score is not None:
@@ -416,50 +634,34 @@ def match_candidate(
 
     if job.required_skills:
         active_weights.append(
-            (
-                REQUIRED_SKILLS_WEIGHT,
-                required_result["match_score"]
-            )
+            (REQUIRED_SKILLS_WEIGHT, required_result["match_score"])
         )
 
     if job.preferred_skills:
         active_weights.append(
-            (
-                PREFERRED_SKILLS_WEIGHT,
-                preferred_result["match_score"]
-            )
+            (PREFERRED_SKILLS_WEIGHT, preferred_result["match_score"])
         )
 
-    total_weight = sum(
-        weight for weight, score in active_weights
+    total_weight = sum(weight for weight, _ in active_weights)
+
+    overall_match_score = (
+        sum(weight * score for weight, score in active_weights)
+        / total_weight
+        if total_weight else 0.0
     )
 
-    if total_weight:
-
-        overall_match_score = sum(
-            weight * score
-            for weight, score in active_weights
-        ) / total_weight
-
-    else:
-        overall_match_score = 0.0
-
-    # Summary
-
+    # Match summary.
     if overall_match_score >= 75:
         summary = "Strong candidate match."
-
     elif overall_match_score >= 50:
         summary = "Moderate candidate match."
-
     else:
         summary = "Low candidate match."
 
     if education_eligible is False:
         summary += " Education requirement not verified."
 
-    # Return structured result
-
+    # Structured result.
     return CandidateMatchResult(
 
         overall_match_score=round(overall_match_score, 2),
