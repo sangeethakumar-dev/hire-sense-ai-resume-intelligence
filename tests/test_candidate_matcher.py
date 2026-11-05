@@ -16,13 +16,17 @@ def test_candidate_matcher():
     candidate_profile = parse_resume(resume_text)
 
     # 3. Read Job Description
-    jd_path = "data/job_descriptions/vasiva_ai_intern.txt"
+    jd_path = "data/job_descriptions/CloudData_Technologies_AIML_Developer.txt"
 
     with open(jd_path, "r", encoding="utf-8") as file:
         jd_text = file.read()
 
     # 4. Analyse Job Description
     job_profile = analyse_job_description(jd_text)
+
+    print("Candidate education:", candidate_profile.education)
+    print("JD education:", job_profile.education)
+
 
     # 5. Match candidate and job
     match_result = match_candidate(
