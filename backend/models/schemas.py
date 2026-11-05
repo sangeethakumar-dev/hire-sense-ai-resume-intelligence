@@ -47,10 +47,24 @@ class JobDescriptionProfile(BaseModel):
     education : list[str] = Field(default_factory=list)
     responsibilities : list[str] = Field(default_factory=list)
 
-class CandidateMatchresult(BaseModel):
+class CandidateMatchResult(BaseModel):
     overall_match_score : float
+
+    keyword_match_score : float
+    semantic_match_score : float
+
+    required_skill_score : float
+    preferred_skill_score : float
+
+    experience_score: float | None = None
+    education_eligible: bool | None = None
+
     matched_skills : list[str] = Field(default_factory=list)
     missing_required_skills : list[str] = Field(default_factory=list)
     matched_preferred_skills : list[str] = Field(default_factory=list)
-    skill_match_percentage: float
+
+
+    matching_evidence : list[str] = Field(default_factory=list)
+    missing_requirements : list[str] = Field(default_factory=list)
+
     match_summary : str
