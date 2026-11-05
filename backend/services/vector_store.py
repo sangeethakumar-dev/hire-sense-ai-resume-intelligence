@@ -1,14 +1,18 @@
 
 import chromadb
 import hashlib
+import os
 from pathlib import Path
 from typing import Any
+import json
 
 from backend.services.embedding_service import generate_embeddings
 
 
 # Persistent ChromaDB storage directory
-CHROMA_DB_PATH = Path("data/chroma_db")
+CHROMA_DB_PATH = Path(
+    os.getenv("CHROMA_DB_PATH", "data/chroma_db")
+)
 
 CHROMA_DB_PATH.mkdir(parents=True, exist_ok=True)
 
@@ -174,3 +178,100 @@ def search_resume_chunks(
     )
 
     return results
+
+
+# ============================================================
+# RESUME CACHE RETRIEVAL
+# ============================================================
+
+def get_cached_resume(file_hash: str) -> dict | None:
+    """
+    Retrieve an already processed resume using its SHA-256 hash.
+
+    Returns the candidate profile, candidate ID and existing
+    vector metadata without generating new embeddings.
+    """
+
+    result = resume_collection.get(
+        where={"file_hash": file_hash},
+        include=["metadatas"]
+    )
+
+    if not result["ids"]:
+        return None
+
+    metadatas = result.get("metadatas") or []
+
+    if not metadatas:
+        return None
+
+    metadata = metadatas[0]
+
+    profile_json = metadata.get("candidate_profile_json")
+
+    if not profile_json:
+        return {
+            "candidate_id": metadata.get("candidate_id"),
+            "candidate_name": metadata.get("candidate_name"),
+            "candidate_profile": None,
+            "file_hash": file_hash,
+            "cached": True,
+            "metadata": metadata
+        }
+
+    candidate_profile = json.loads(profile_json)
+
+    return {
+        "candidate_id": metadata.get("candidate_id"),
+        "candidate_name": metadata.get("candidate_name"),
+        "candidate_profile": candidate_profile,
+        "file_hash": file_hash,
+        "cached": True,
+        "metadata": metadata
+    }
+
+
+# ============================================================
+# UPDATE EXISTING RESUME METADATA
+# ============================================================
+
+def update_resume_metadata(
+    file_hash: str,
+    extra_metadata: dict
+) -> bool:
+    """
+    Update metadata of existing resume chunks.
+
+    This does not regenerate or modify existing embeddings.
+    """
+
+    result = resume_collection.get(
+        where={"file_hash": file_hash},
+        include=["metadatas"]
+    )
+
+    ids = result.get("ids", [])
+    metadatas = result.get("metadatas", [])
+
+    if not ids:
+        return False
+
+    updated_metadatas = []
+
+    for metadata in metadatas:
+
+        updated_metadata = metadata.copy()
+
+        updated_metadata.update(extra_metadata)
+
+        updated_metadatas.append(
+            updated_metadata
+        )
+
+    resume_collection.update(
+        ids=ids,
+        metadatas=updated_metadatas
+    )
+
+    return True
+

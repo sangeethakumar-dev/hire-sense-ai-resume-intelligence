@@ -1,4 +1,5 @@
 import os
+import time
 
 from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -68,17 +69,80 @@ def parse_resume(resume_text : str )-> ResumeProfile:
     #Configure Structured output using Pydantic
     structured_llm = llm.with_structured_output(ResumeProfile)
 
-    #Connect Prompt and LLM
+        
+    # Connect Prompt and LLM
 
     extraction_chain = prompt | structured_llm
 
-    #Generate Structured Candidate Profile
-    try:
-        candidate_profile = extraction_chain.invoke({
-            "resume_text":resume_text
-        })
-        return candidate_profile
-    except Exception as error:
-        raise RuntimeError(
-            f"Resume Parsing Failed : {error}"
-        ) from error
+
+    # ============================================================
+    # GEMINI RETRY MECHANISM
+    # ============================================================
+
+    MAX_RETRIES = 3
+
+    RETRYABLE_ERRORS = [
+        "503",
+        "429",
+        "500",
+        "502",
+        "504",
+        "UNAVAILABLE",
+        "RESOURCE_EXHAUSTED",
+        "SERVICE_UNAVAILABLE",
+        "INTERNAL_SERVER_ERROR",
+        "high demand",
+        "rate limit",
+        "temporarily unavailable"
+    ]
+
+    for attempt in range(1, MAX_RETRIES + 1):
+
+        try:
+
+            print(
+                f"Gemini resume parsing attempt "
+                f"{attempt}/{MAX_RETRIES}"
+            )
+
+            candidate_profile = extraction_chain.invoke({
+                "resume_text": resume_text
+            })
+
+            print("Resume parsing completed successfully.")
+
+            return candidate_profile
+
+        except Exception as error:
+
+            error_message = str(error).upper()
+
+            is_retryable = any(
+                retry_error.upper() in error_message
+                for retry_error in RETRYABLE_ERRORS
+            )
+
+            if not is_retryable:
+
+                raise RuntimeError(
+                    f"Resume Parsing Failed: {error}"
+                ) from error
+
+            if attempt == MAX_RETRIES:
+
+                raise RuntimeError(
+                    f"Resume Parsing Failed after "
+                    f"{MAX_RETRIES} attempts: {error}"
+                ) from error
+
+            wait_seconds = 2 ** attempt
+
+            print(
+                f"Temporary Gemini error: {error}"
+            )
+
+            print(
+                f"Retrying in {wait_seconds} seconds..."
+            )
+
+            time.sleep(wait_seconds)
